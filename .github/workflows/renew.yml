@@ -2,9 +2,6 @@ name: LemeHost Auto Renewal
 
 on:
   workflow_dispatch:
-    # 自触发循环模式：
-    # 首次需手动触发（Actions → Run workflow），之后每轮结束 sleep 后自动触发下一轮
-    # 不依赖 schedule cron（避免不准时、60天禁用问题）
 
 jobs:
   renew:
@@ -12,10 +9,6 @@ jobs:
     # timeout 必须覆盖「单次检查 + sleep」总时长
     # 单次检查约 5 分钟，sleep 默认 11 分钟 → 留余量设 25 分钟
     timeout-minutes: 25
-    concurrency:
-      # 防止手动触发与自动链并发；取消旧运行，新运行结束会继续触发下一轮
-      group: lemehost-renew
-      cancel-in-progress: true
 
     steps:
       - name: Checkout
