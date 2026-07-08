@@ -18,6 +18,7 @@ import ssl
 import sys
 import time
 import json
+import pickle
 import random
 import ddddocr
 import requests
@@ -32,8 +33,14 @@ LEME = os.environ.get("LEME", "")
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
 TG_API = os.environ.get("TG_API", "https://api.telegram.org")
-RENEW_THRESHOLD = int(os.environ.get("RENEW_THRESHOLD", "900"))
+_RT = os.environ.get("RENEW_THRESHOLD", "900")
+try:
+    RENEW_THRESHOLD = int(_RT)
+except ValueError:
+    print(f"::error::❌ RENEW_THRESHOLD 不是有效数字: '{_RT}'")
+    sys.exit(1)
 COOKIE_DIR = os.environ.get("COOKIE_DIR", "/tmp/lemehost_cookies")
+DEBUG_DIR = os.environ.get("DEBUG_DIR", "/tmp/lemehost_debug")
 
 # ============================================================
 # 常量
@@ -62,6 +69,15 @@ STATS = {
     "starts": 0,
 }
 
+STEPS = []
+
+
+def step(name: str, ok: bool, detail: str = ""):
+    STEPS.append({"name": name, "ok": ok, "detail": detail})
+    emoji = "✅" if ok else "❌"
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] [STEP] {emoji} {name} — {detail}")
+
 
 def log(msg: str):
     """打印日志（GitHub Action 会自动捕获 stdout）"""
@@ -79,6 +95,20 @@ def error(msg: str):
     """GitHub Action 的 error 注解"""
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"::error::[{ts}] {msg}")
+
+
+def save_html(name: str, html: str, resp=None):
+    try:
+        os.makedirs(DEBUG_DIR, exist_ok=True)
+        path = os.path.join(DEBUG_DIR, f"{name}.html")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(html[:100000])
+        if resp is not None:
+            meta = {"url": getattr(resp, "url", ""), "status": getattr(resp, "status_code", 0)}
+            with open(os.path.join(DEBUG_DIR, f"{name}_meta.json"), "w") as f:
+                json.dump(meta, f, indent=2)
+    except Exception as e:
+        log(f"[DEBUG] 保存 HTML {name} 失败: {e}")
 
 
 def mask(text: str) -> str:
@@ -173,13 +203,13 @@ class LemeHostRenewer:
     def _load_cookies(self) -> bool:
         """从缓存加载 cookie，成功且有效则返回 True"""
         hash_val = hashlib.md5(self.email.encode()).hexdigest()[:8]
-        path = os.path.join(COOKIE_DIR, f"cookies_{hash_val}.json")
-        if not os.path.exists(path):
+        pkl = os.path.join(COOKIE_DIR, f"cookies_{hash_val}.pkl")
+        if not os.path.exists(pkl):
             return False
         try:
-            with open(path) as f:
-                data = json.load(f)
-            self.session.cookies.update(data.get("cookies", {}))
+            with open(pkl, "rb") as f:
+                data = pickle.load(f)
+            self.session.cookies = data["cookies"]
             # 测试会话是否有效
             resp = self.session.get(SERVER_INDEX_URL, timeout=30)
             if "Logout" in resp.text:
@@ -198,12 +228,11 @@ class LemeHostRenewer:
         try:
             os.makedirs(COOKIE_DIR, exist_ok=True)
             hash_val = hashlib.md5(self.email.encode()).hexdigest()[:8]
-            path = os.path.join(COOKIE_DIR, f"cookies_{hash_val}.json")
-            cookies = requests.utils.dict_from_cookiejar(self.session.cookies)
-            data = {"cookies": cookies, "email": self.email, "saved_at": time.time()}
-            with open(path, "w") as f:
-                json.dump(data, f, indent=2)
-            log(f"[COOKIE] 💾 已保存 {len(cookies)} 个 cookie")
+            path = os.path.join(COOKIE_DIR, f"cookies_{hash_val}.pkl")
+            data = {"cookies": self.session.cookies, "email": self.email, "saved_at": time.time()}
+            with open(path, "wb") as f:
+                pickle.dump(data, f)
+            log(f"[COOKIE] 💾 已保存 cookie")
         except Exception as e:
             log(f"[COOKIE] ⚠️ 保存失败: {e}")
 
@@ -253,13 +282,16 @@ class LemeHostRenewer:
 
                 resp = self.session.get(LOGIN_URL, timeout=30)
                 html = resp.text
+                save_html(f"login_{hashlib.md5(self.email.encode()).hexdigest()[:8]}_page", html, resp)
 
                 if "loginform-email" not in html:
                     if "challenge" in html.lower() or "cloudflare" in html.lower() or len(html) < 1000:
                         wait = 10 + attempt * 3
+                        step(f"login_page_{attempt}", False, f"CF 拦截 ({len(html)}b)")
                         log(f"[LOGIN] ⚠️ CF 拦截，等待 {wait}s...")
                         time.sleep(wait)
                     else:
+                        step(f"login_page_{attempt}", False, "登录页无表单")
                         log("[LOGIN] ❌ 登录页无表单")
                         time.sleep(3)
                     continue
@@ -268,12 +300,14 @@ class LemeHostRenewer:
                 if not csrf:
                     csrf = self._ex(r'<meta\s+name="csrf-token"\s+content="([^"]+)"', html)
                 if not csrf:
+                    step(f"login_csrf_{attempt}", False, "CSRF 提取失败")
                     log("[LOGIN] ❌ CSRF 失败")
                     continue
 
                 key = self._ex(r'id="loginform-key"[^>]*value="([^"]*)"', html) or ""
                 cap_url = self._ex(r'id="loginform-verifycode-image"\s+src="([^"]+)"', html)
                 if not cap_url:
+                    step(f"login_captcha_{attempt}", False, "验证码元素未找到")
                     continue
                 if cap_url.startswith("/"):
                     cap_url = BASE_URL + cap_url
@@ -303,6 +337,7 @@ class LemeHostRenewer:
                     time.sleep(random.uniform(0.3, 0.6))
 
                 if not captcha:
+                    step(f"login_ocr_{attempt}", False, "无6位验证码结果")
                     log("[LOGIN] ⏭️ 本轮无6位结果")
                     continue
 
@@ -322,20 +357,27 @@ class LemeHostRenewer:
 
                 if "Logout" in resp.text:
                     log(f"[LOGIN] ✅ 成功: {mask(self.email)} (第{attempt}次, 共{total_captcha[0]}次OCR)")
+                    step("login", True, f"{mask(self.email)} 第{attempt}次成功")
                     self.logged_in = True
                     self._save_cookies()
                     return True
+                save_html(f"login_{hashlib.md5(self.email.encode()).hexdigest()[:8]}_post_{attempt}", resp.text, resp)
                 if "verification code is incorrect" in resp.text.lower() or "Invalid CAPTCHA" in resp.text:
+                    step(f"login_captcha_err_{attempt}", False, f"验证码错误 '{captcha}'")
                     log(f"[LOGIN] ❌ 验证码错误 '{captcha}'")
                     time.sleep(random.uniform(0.5, 1.5))
                     continue
                 if "Incorrect email or password" in resp.text:
+                    step("login", False, "密码错误")
                     log(f"[LOGIN] ❌ 密码错误: {mask(self.email)}")
                     return False
+                step(f"login_post_{attempt}", False, f"未知结果, 页面大小{len(resp.text)}b")
             except Exception as e:
+                step(f"login_exception_{attempt}", False, str(e)[:80])
                 log(f"[LOGIN] ❌ 异常: {e}")
                 time.sleep(random.uniform(3, 6))
 
+        step("login", False, f"{mask(self.email)} 全部{MAX_LOGIN_RETRY}次尝试失败")
         log(f"[LOGIN] ❌ 失败: {mask(self.email)}")
         return False
 
@@ -532,6 +574,8 @@ class LemeHostRenewer:
 
     # ── 检查 + 开机 + 续期 ──
     def check_and_renew(self, server_id, server_name=""):
+        def _snap(tag, h, r=None):
+            save_html(f"s{server_id}_{tag}", h, r)
         result = {
             "success": False, "server_id": server_id, "server_name": server_name,
             "old_expiry": "", "new_expiry": "", "message": "", "remaining": "",
@@ -541,6 +585,7 @@ class LemeHostRenewer:
         try:
             resp = self.session.get(url, timeout=30)
             html = resp.text
+            _snap("plan_page", html, resp)
             auto_ts = 0
             m = re.search(r'id="countdown"\s+data-timestamp="(\d+)"', html)
             if m:
@@ -559,10 +604,12 @@ class LemeHostRenewer:
             need_check = False
             if remain == 0:
                 need_check = True
+                step(f"check_{server_id}", True, f"倒计时过期(remain=0)")
                 log(f"  [CHECK] {server_id} ⚠️ 倒计时过期")
                 self._started_servers.discard(server_id)
             if "was recently stopped" in html or "reason of inactivity" in html:
                 need_check = True
+                step(f"check_{server_id}", True, "停机提示")
                 log(f"  [CHECK] {server_id} ⚠️ 停机提示")
             if server_id in self._started_servers and remain > 0:
                 need_check = False
@@ -570,10 +617,12 @@ class LemeHostRenewer:
                 ws_result = self._check_and_start_via_ws(server_id)
                 if ws_result == "started":
                     result["started"] = True
+                    step(f"ws_{server_id}", True, "已发送开机指令")
                     log("  [CHECK] ⏳ 等待开机...")
                     time.sleep(10)
                     resp = self.session.get(url, timeout=30)
                     html = resp.text
+                    _snap("after_start", html, resp)
                     auto_ts = 0
                     m = re.search(r'id="countdown"\s+data-timestamp="(\d+)"', html)
                     if m:
@@ -584,8 +633,10 @@ class LemeHostRenewer:
                     if m:
                         del_ts = int(m.group(1))
                 elif ws_result == "already_running":
+                    step(f"ws_{server_id}", True, "已在运行")
                     pass
                 else:
+                    step(f"ws_{server_id}", False, "检查失败")
                     log(f"  [CHECK] {server_id} ⚠️ WS 检查失败")
             if remain > 0:
                 self._started_servers.discard(server_id)
@@ -594,12 +645,14 @@ class LemeHostRenewer:
                 result["remaining"] = fmt_seconds(remain)
                 log(f"  [CHECK] {server_id} 剩余: {fmt_seconds(remain)} ({remain}s)")
                 if remain > RENEW_THRESHOLD:
+                    step(f"renew_{server_id}", True, f"跳过，剩余{fmt_seconds(remain)}")
                     result["skipped"] = True
                     result["message"] = f"剩余 {fmt_seconds(remain)}，无需续期"
                     if del_ts:
                         result["old_expiry"] = result["new_expiry"] = ts_to_cn(del_ts)
                     return result
             else:
+                step(f"check_{server_id}", False, "未获取到倒计时")
                 log(f"  [CHECK] {server_id} 未获取到倒计时")
             if del_ts:
                 result["old_expiry"] = ts_to_cn(del_ts)
@@ -607,13 +660,16 @@ class LemeHostRenewer:
             if not csrf:
                 csrf = self._ex(r'<meta\s+name="csrf-token"\s+content="([^"]+)"', html)
             if not csrf:
+                step(f"renew_{server_id}", False, "CSRF 获取失败")
                 result["message"] = "CSRF 获取失败"
+                _snap("no_csrf", html)
                 return result
 
             # ── 检测续期页是否需要验证码 ──
             has_captcha = "extendfreeplanform-captcha-image" in html
             captcha_value = ""
             if has_captcha:
+                step(f"renew_{server_id}_captcha", True, "续期需要验证码")
                 log(f"  [RENEW] ⚠️ 续期需要验证码!")
                 cap_url = self._ex(r'id="extendfreeplanform-captcha-image"\s+src="([^"]+)"', html)
                 if cap_url and cap_url.startswith("/"):
@@ -621,6 +677,7 @@ class LemeHostRenewer:
                 if cap_url:
                     captcha_value = self._solve_captcha(cap_url, min_len=6, max_len=7, max_try=15)
                 if not captcha_value:
+                    step(f"renew_{server_id}", False, "续期验证码识别失败")
                     log("  [RENEW] ❌ 续期验证码识别失败")
                     result["message"] = "续期验证码识别失败"
                     return result
@@ -630,7 +687,7 @@ class LemeHostRenewer:
 
             # ── 提交续期（最多重试30轮验证码） ──
             for renew_try in range(30):
-                self.session.post(url, data={
+                post_resp = self.session.post(url, data={
                     "_csrf-frontend": csrf,
                     "ExtendFreePlanForm[captcha]": captcha_value,
                 }, timeout=30, headers={
@@ -639,11 +696,14 @@ class LemeHostRenewer:
                     "X-Requested-With": "XMLHttpRequest",
                     "X-PJAX": "true", "X-PJAX-Container": "#p0",
                 })
+                _snap(f"renew_post_{renew_try}", post_resp.text, post_resp)
                 time.sleep(random.uniform(1, 2))
                 resp3 = self.session.get(url, timeout=30)
                 html3 = resp3.text
+                _snap(f"renew_verify_{renew_try}", html3, resp3)
                 # 检查验证码是否错误
                 if has_captcha and ("verification code is incorrect" in html3.lower() or "Captcha cannot be blank" in html3):
+                    step(f"renew_{server_id}_try{renew_try}", False, f"验证码错误")
                     log(f"  [RENEW] ❌ 续期验证码错误 (第{renew_try + 1}次)")
                     csrf = self._ex(r'name="_csrf-frontend"\s+value="([^"]+)"', html3)
                     if not csrf:
@@ -677,21 +737,27 @@ class LemeHostRenewer:
             if del_ts > 0 and new_del > del_ts:
                 result["success"] = True
                 result["message"] = "续期成功"
+                step(f"renew_{server_id}", True, f"{result['old_expiry']} -> {result['new_expiry']}")
                 log(f"  [RENEW] ✅ 成功! {result['old_expiry']} -> {result['new_expiry']}")
             elif new_del > 0 and del_ts == 0:
                 result["success"] = True
                 result["message"] = "续期成功"
+                step(f"renew_{server_id}", True, "新到期时间")
             elif del_ts > 0 and new_del == del_ts:
                 now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
                 if new_del > now_ms:
                     result["success"] = True
                     result["message"] = "续期成功（有效期内）"
+                    step(f"renew_{server_id}", True, "有效期内")
                 else:
                     result["message"] = "到期时间未变化"
+                    step(f"renew_{server_id}", False, "到期时间未变化")
             else:
                 result["message"] = "续期结果未知"
+                step(f"renew_{server_id}", False, f"del_ts={del_ts} new_del={new_del}")
         except Exception as e:
             result["message"] = f"异常: {e}"
+            step(f"renew_{server_id}", False, str(e)[:80])
             log(f"  [RENEW] ❌ {e}")
         return result
 
@@ -700,16 +766,25 @@ class LemeHostRenewer:
 # 主流程（单次执行，非循环）
 # ============================================================
 def main():
-    accounts = parse_accounts(LEME)
-    STATS["accounts"] = len(accounts)
-
     print("=" * 60)
     print("  🎮 Leme Host Auto Renewal — GitHub Action")
     print("=" * 60)
+    log(f"DEBUG_DIR={DEBUG_DIR}")
+    os.makedirs(DEBUG_DIR, exist_ok=True)
+
+    if not LEME:
+        error("❌ LEME 环境变量未设置")
+        step("startup", False, "LEME 为空")
+        print("格式：邮箱-----密码 （每行一个账号）")
+        sys.exit(1)
+
+    accounts = parse_accounts(LEME)
+    STATS["accounts"] = len(accounts)
     log(f"📋 账号: {len(accounts)} | 阈值: {RENEW_THRESHOLD}s")
 
     if not accounts:
         error("❌ 未配置 LEME 环境变量")
+        step("startup", False, "解析后账号数为 0")
         print("格式：邮箱-----密码 （每行一个账号）")
         sys.exit(1)
 
@@ -799,6 +874,28 @@ def main():
     print(f"  开机:     {STATS['starts']} 🟢")
     print("=" * 60)
 
+    # 输出步骤追踪汇总
+    print()
+    print("  📋 步骤追踪")
+    fail_cnt = sum(1 for s in STEPS if not s["ok"])
+    print(f"  总计 {len(STEPS)} 步, 失败 {fail_cnt} 步")
+    for s in STEPS:
+        emoji = "✅" if s["ok"] else "❌"
+        print(f"  {emoji} {s['name']}: {s['detail']}")
+    print("=" * 60)
+
+    # 列出调试文件
+    try:
+        files = [f for f in os.listdir(DEBUG_DIR) if not f.endswith(".meta.json")]
+        if files:
+            print(f"  📎 调试文件 ({len(files)} 个):")
+            for f in sorted(files):
+                sz = os.path.getsize(os.path.join(DEBUG_DIR, f))
+                print(f"    {f} ({sz}b)")
+        print("=" * 60)
+    except Exception:
+        pass
+
     # 总结通知
     summary = (
         f"📊 Leme Host 本轮完成\n\n"
@@ -809,6 +906,13 @@ def main():
         f"{SIGNATURE}"
     )
     send_telegram(summary)
+
+    # 保存步骤追踪到调试目录
+    try:
+        with open(os.path.join(DEBUG_DIR, "steps_summary.json"), "w") as f:
+            json.dump({"steps": STEPS, "stats": STATS, "fail_count": sum(1 for s in STEPS if not s["ok"])}, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
 
     # 如果有失败，以非零退出码让 GitHub Action 标记为失败
     if STATS["failures"] > 0:

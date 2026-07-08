@@ -21,6 +21,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup WARP
+        uses: fscarmen/warp-on-actions@v1.3
+        with:
+          stack: dual
+          mode: client
+
+      - name: Fix DNS
+        run: |
+          sudo systemctl stop systemd-resolved 2>/dev/null || true
+          sudo systemctl disable systemd-resolved 2>/dev/null || true
+          sudo rm -f /etc/resolv.conf
+          echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 1.0.0.1" | sudo tee /etc/resolv.conf
+          echo "Public IP: $(curl -s --max-time 10 https://api.ipify.org)"
+          curl -s --max-time 10 https://www.cloudflare.com/cdn-cgi/trace | grep -E 'ip=|warp=|loc=' || true
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -36,7 +51,8 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: /tmp/lemehost_cookies
-          key: lemehost-cookies-v1
+          key: lemehost-cookies-${{ github.run_id }}
+          restore-keys: lemehost-cookies-
 
       - name: Run renewal check
         env:
@@ -46,6 +62,7 @@ jobs:
           TG_API: ${{ secrets.TG_API }}
           RENEW_THRESHOLD: ${{ secrets.RENEW_THRESHOLD }}
           COOKIE_DIR: /tmp/lemehost_cookies
+          DEBUG_DIR: /tmp/lemehost_debug
         run: python renew.py
 
       # 保存本轮 cookie 供下一轮使用（always 保证即使失败也保存）
@@ -54,7 +71,14 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: /tmp/lemehost_cookies
-          key: lemehost-cookies-v1
+          key: lemehost-cookies-${{ github.run_id }}
+
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-${{ github.run_id }}
+          path: /tmp/lemehost_debug/
 
       - name: Schedule next run
         if: always()
