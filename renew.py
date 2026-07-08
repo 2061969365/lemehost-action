@@ -210,7 +210,8 @@ class LemeHostRenewer:
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Accept-Encoding": "gzip, deflate",
         })
-        self.ocr = ddddocr.DdddOcr(show_ad=False)
+        self.ocr_new = ddddocr.DdddOcr(show_ad=False)
+        self.ocr_old = ddddocr.DdddOcr(show_ad=False, old=True)
         self.logged_in = False
         self._started_servers = set()
         # 尝试从缓存恢复 cookie 会话
@@ -259,18 +260,36 @@ class LemeHostRenewer:
         m = re.search(pattern, html)
         return m.group(1) if m else ""
 
+    # ── 验证码识别（双模型集成） ──
+    def _solve_captcha_multi(self, img_bytes, min_len=6, max_len=7):
+        """对同一张图跑 4 种组合，返回第一个合法结果"""
+        raw = img_bytes
+        proc = preprocess_captcha(img_bytes)
+        for label, ocr, data in [
+            ("新+原", self.ocr_new, raw),
+            ("新+预处理", self.ocr_new, proc),
+            ("旧+原", self.ocr_old, raw),
+            ("旧+预处理", self.ocr_old, proc),
+        ]:
+            try:
+                r = ocr.classification(data)
+                if r and re.match(rf'^[a-zA-Z]{{{min_len},{max_len}}}$', r):
+                    return r, label
+            except Exception:
+                pass
+        return "", ""
+
     # ── 验证码识别（通用，含预处理） ──
     def _solve_captcha(self, cap_url, min_len=6, max_len=7, max_try=15):
         for ct in range(1, max_try + 1):
             try:
                 img_resp = self.session.get(cap_url, timeout=15)
-                processed = preprocess_captcha(img_resp.content)
-                result = self.ocr.classification(processed)
-                if result and re.match(rf'^[a-zA-Z]{{{min_len},{max_len}}}$', result):
-                    log(f"    [OCR] #{ct}: '{result}' ✅")
+                result, label = self._solve_captcha_multi(img_resp.content, min_len, max_len)
+                if result:
+                    log(f"    [OCR] #{ct} ({label}): '{result}' ✅")
                     return result
                 else:
-                    log(f"    [OCR] #{ct}: '{result}' (非{min_len}-{max_len}位)")
+                    log(f"    [OCR] #{ct}: 全部失败")
             except Exception as e:
                 log(f"    [OCR] #{ct}: 异常 {e}")
             try:
@@ -330,20 +349,19 @@ class LemeHostRenewer:
                 if cap_url.startswith("/"):
                     cap_url = BASE_URL + cap_url
 
-                # 识别验证码（严格6位字母，含预处理）
+                # 识别验证码（双模型集成）
                 captcha = ""
-                for ct in range(1, 15):
+                for ct in range(1, 10):
                     total_captcha[0] += 1
                     try:
                         img_resp = self.session.get(cap_url, timeout=15)
-                        processed = preprocess_captcha(img_resp.content)
-                        result = self.ocr.classification(processed)
-                        if result and re.match(r'^[a-zA-Z]{6,7}$', result):
+                        result, label = self._solve_captcha_multi(img_resp.content)
+                        if result:
                             captcha = result
-                            log(f"  [OCR] #{total_captcha[0]}: '{result}' ✅")
+                            log(f"  [OCR] #{total_captcha[0]} ({label}): '{result}' ✅")
                             break
                         else:
-                            log(f"  [OCR] #{total_captcha[0]}: '{result}' (非6-7位)")
+                            log(f"  [OCR] #{total_captcha[0]}: 全部失败")
                     except Exception as e:
                         log(f"  [OCR] #{total_captcha[0]}: 异常 {e}")
                     try:
