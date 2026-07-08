@@ -1,0 +1,71 @@
+name: LemeHost Auto Renewal
+
+on:
+  workflow_dispatch:
+    # 自触发循环模式：
+    # 首次需手动触发（Actions → Run workflow），之后每轮结束 sleep 后自动触发下一轮
+    # 不依赖 schedule cron（避免不准时、60天禁用问题）
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    # timeout 必须覆盖「单次检查 + sleep」总时长
+    # 单次检查约 5 分钟，sleep 默认 11 分钟 → 留余量设 25 分钟
+    timeout-minutes: 25
+    concurrency:
+      # 防止手动触发与自动链并发；取消旧运行，新运行结束会继续触发下一轮
+      group: lemehost-renew
+      cancel-in-progress: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # 恢复上一轮缓存的 cookie，避免每轮都要账号密码登录
+      - name: Restore cookies from cache
+        id: cookie-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/lemehost_cookies
+          key: lemehost-cookies-v1
+
+      - name: Run renewal check
+        env:
+          LEME: ${{ secrets.LEME }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TG_API: ${{ secrets.TG_API }}
+          RENEW_THRESHOLD: ${{ secrets.RENEW_THRESHOLD }}
+          COOKIE_DIR: /tmp/lemehost_cookies
+        run: python renew.py
+
+      # 保存本轮 cookie 供下一轮使用（always 保证即使失败也保存）
+      - name: Save cookies to cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/lemehost_cookies
+          key: lemehost-cookies-v1
+
+      - name: Schedule next run
+        if: always()
+        env:
+          # 必须用 PAT（需 repo + workflow 权限），GITHUB_TOKEN 无法触发自身
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          # 下一轮间隔（秒），默认 660=11分钟；建议 ≥600
+          SLEEP_SECONDS: ${{ secrets.SLEEP_SECONDS || '660' }}
+        run: |
+          echo "💤 Sleep ${SLEEP_SECONDS}s before next run..."
+          sleep "$SLEEP_SECONDS"
+          echo "🔁 Triggering next run..."
+          gh workflow run renew.yml
+          echo "✅ Next run scheduled"
