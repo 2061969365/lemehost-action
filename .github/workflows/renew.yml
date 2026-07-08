@@ -86,7 +86,7 @@ jobs:
           # 必须用 PAT（需 repo + workflow 权限），GITHUB_TOKEN 无法触发自身
           GH_TOKEN: ${{ secrets.GH_PAT }}
           # 下一轮间隔（秒），默认 660=11分钟；建议 ≥600
-          SLEEP_SECONDS: ${{ secrets.SLEEP_SECONDS || '660' }}
+          SLEEP_SECONDS: ${{ secrets.SLEEP_SECONDS || '5' }}
         run: |
           echo "💤 Sleep ${SLEEP_SECONDS}s before next run..."
           sleep "$SLEEP_SECONDS"
