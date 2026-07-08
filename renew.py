@@ -26,6 +26,8 @@ import requests
 import websocket
 import requests.utils
 from PIL import Image, ImageFilter
+import cv2
+import numpy as np
 from datetime import datetime, timezone, timedelta
 
 # ============================================================
@@ -195,6 +197,19 @@ def preprocess_captcha(img_bytes: bytes) -> bytes:
         return img_bytes
 
 
+def preprocess_captcha_opencv(img_bytes: bytes) -> bytes:
+    try:
+        arr = np.frombuffer(img_bytes, np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+        _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        cleaned = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+        _, buf = cv2.imencode(".png", cleaned)
+        return buf.tobytes()
+    except Exception:
+        return img_bytes
+
+
 # ============================================================
 # 类
 # ============================================================
@@ -210,8 +225,8 @@ class LemeHostRenewer:
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Accept-Encoding": "gzip, deflate",
         })
-        self.ocr_new = ddddocr.DdddOcr(show_ad=False)
-        self.ocr_old = ddddocr.DdddOcr(show_ad=False, old=True)
+        self.ocr_default = ddddocr.DdddOcr(show_ad=False)
+        self.ocr_beta = ddddocr.DdddOcr(show_ad=False, beta=True)
         self.logged_in = False
         self._started_servers = set()
         # 尝试从缓存恢复 cookie 会话
@@ -260,16 +275,19 @@ class LemeHostRenewer:
         m = re.search(pattern, html)
         return m.group(1) if m else ""
 
-    # ── 验证码识别（双模型集成） ──
+    # ── 验证码识别（多模型多预处理集成） ──
     def _solve_captcha_multi(self, img_bytes, min_len=6, max_len=7):
-        """对同一张图跑 4 种组合，返回第一个合法结果"""
+        """对同一张图跑 6 种组合，返回第一个合法结果"""
         raw = img_bytes
-        proc = preprocess_captcha(img_bytes)
+        proc_pil = preprocess_captcha(img_bytes)
+        proc_cv = preprocess_captcha_opencv(img_bytes)
         for label, ocr, data in [
-            ("新+原", self.ocr_new, raw),
-            ("新+预处理", self.ocr_new, proc),
-            ("旧+原", self.ocr_old, raw),
-            ("旧+预处理", self.ocr_old, proc),
+            ("默认+原", self.ocr_default, raw),
+            ("默认+PIL", self.ocr_default, proc_pil),
+            ("默认+CV", self.ocr_default, proc_cv),
+            ("beta+原", self.ocr_beta, raw),
+            ("beta+PIL", self.ocr_beta, proc_pil),
+            ("beta+CV", self.ocr_beta, proc_cv),
         ]:
             try:
                 r = ocr.classification(data)
