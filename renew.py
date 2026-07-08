@@ -20,10 +20,12 @@ import time
 import json
 import pickle
 import random
+import io
 import ddddocr
 import requests
 import websocket
 import requests.utils
+from PIL import Image, ImageFilter
 from datetime import datetime, timezone, timedelta
 
 # ============================================================
@@ -179,7 +181,22 @@ def fmt_seconds(s: int) -> str:
 
 
 # ============================================================
-# 续期核心类（每个账号独立实例）
+# 验证码图片预处理
+# ============================================================
+def preprocess_captcha(img_bytes: bytes) -> bytes:
+    try:
+        img = Image.open(io.BytesIO(img_bytes)).convert("L")
+        img = img.point(lambda x: 0 if x < 160 else 255)
+        img = img.filter(ImageFilter.MedianFilter(size=3))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        return img_bytes
+
+
+# ============================================================
+# 类
 # ============================================================
 class LemeHostRenewer:
     def __init__(self, email: str, password: str):
@@ -242,12 +259,13 @@ class LemeHostRenewer:
         m = re.search(pattern, html)
         return m.group(1) if m else ""
 
-    # ── 验证码识别（通用） ──
+    # ── 验证码识别（通用，含预处理） ──
     def _solve_captcha(self, cap_url, min_len=6, max_len=7, max_try=15):
         for ct in range(1, max_try + 1):
             try:
                 img_resp = self.session.get(cap_url, timeout=15)
-                result = self.ocr.classification(img_resp.content)
+                processed = preprocess_captcha(img_resp.content)
+                result = self.ocr.classification(processed)
                 if result and re.match(rf'^[a-zA-Z]{{{min_len},{max_len}}}$', result):
                     log(f"    [OCR] #{ct}: '{result}' ✅")
                     return result
@@ -312,13 +330,14 @@ class LemeHostRenewer:
                 if cap_url.startswith("/"):
                     cap_url = BASE_URL + cap_url
 
-                # 识别验证码（严格6位字母）
+                # 识别验证码（严格6位字母，含预处理）
                 captcha = ""
-                for ct in range(1, 6):
+                for ct in range(1, 15):
                     total_captcha[0] += 1
                     try:
                         img_resp = self.session.get(cap_url, timeout=15)
-                        result = self.ocr.classification(img_resp.content)
+                        processed = preprocess_captcha(img_resp.content)
+                        result = self.ocr.classification(processed)
                         if result and re.match(r'^[a-zA-Z]{6,7}$', result):
                             captcha = result
                             log(f"  [OCR] #{total_captcha[0]}: '{result}' ✅")
