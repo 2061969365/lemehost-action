@@ -77,7 +77,7 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
-          SLEEP_SECONDS: ${{ secrets.SLEEP_SECONDS || '540' }}
+          SLEEP_SECONDS: ${{ secrets.SLEEP_SECONDS || '360' }}
         run: |
           echo "💤 Sleep ${SLEEP_SECONDS}s before next run..."
           sleep "$SLEEP_SECONDS"
