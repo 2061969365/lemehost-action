@@ -73,14 +73,14 @@ jobs:
           name: debug-${{ github.run_id }}
           path: /tmp/lemehost_debug/
 
-      # - name: Schedule next run
-      #   if: always()
-      #   env:
-      #     GH_TOKEN: ${{ secrets.GH_PAT }}
-      #     SLEEP_SECONDS: ${{ secrets.SLEEP_SECONDS || '660' }}
-      #   run: |
-      #     echo "💤 Sleep ${SLEEP_SECONDS}s before next run..."
-      #     sleep "$SLEEP_SECONDS"
-      #     echo "🔁 Triggering next run..."
-      #     gh workflow run renew.yml
-      #     echo "✅ Next run scheduled"
+      - name: Schedule next run
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          SLEEP_SECONDS: ${{ secrets.SLEEP_SECONDS || '660' }}
+        run: |
+          echo "💤 Sleep ${SLEEP_SECONDS}s before next run..."
+          sleep "$SLEEP_SECONDS"
+          echo "🔁 Triggering next run..."
+          gh workflow run renew.yml
+          echo "✅ Next run scheduled"
